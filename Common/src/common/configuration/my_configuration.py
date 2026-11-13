@@ -17,7 +17,7 @@ import keyring
 from pathlib import Path
 from dataclasses import dataclass
 
-from my_constant import (CONFIG_FILE_NAME, CONFIG_FILE_PATH, LLM_types,
+Eval_EDS.config.app_constants import (CONFIG_FILE_NAME, CONFIG_FILE_PATH, LLM_types,
     DEFAULT_PROMPT_INSTRUCTIONS
 )
 
