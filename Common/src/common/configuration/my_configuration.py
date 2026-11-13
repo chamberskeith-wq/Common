@@ -17,7 +17,7 @@ import keyring
 from pathlib import Path
 from dataclasses import dataclass
 
-from AskMeApp.my_constants import (CONFIG_FILE_NAME, CONFIG_FILE_PATH, LLM_types,
+from my_constant import (CONFIG_FILE_NAME, CONFIG_FILE_PATH, LLM_types,
     DEFAULT_PROMPT_INSTRUCTIONS
 )
 
@@ -113,9 +113,9 @@ class AppConfig:
 #===============================================================================
 # load_config
 #===============================================================================
-def load_config() -> AppConfig:
+def load_config(config_file_name: str , config_file_path: str) -> AppConfig:
     ''' Doc string '''
-    config_path = Path(CONFIG_FILE_PATH) / CONFIG_FILE_NAME
+    config_path = Path(config_file_path) / config_file_name
 
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
