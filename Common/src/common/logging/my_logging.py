@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Iterable
 
-APP_NAMESPACE = "AskMeApp"
+#APP_NAMESPACE = "AskMeApp"
 
 NOISY_LIBRARIES: tuple[str, ...] = (
     "kivy",

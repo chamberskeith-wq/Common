@@ -16,9 +16,12 @@ logger = logging.getLogger(__name__)
 import yaml 
 import os
 import keyring
+from enum import Enum
 from pathlib import Path
-from dataclasses import dataclass, asdict, is_dataclass
-from typing import TypeVar, Generic, Type
+from dataclasses import dataclass, asdict, is_dataclass, fields
+from typing import TypeVar, Generic, Type, get_type_hints, get_origin, get_args
+from types import UnionType
+from typing import Union
 
 from .exceptions import ConfigError, ConfigValidationError, ConfigFileError, ConfigSecretError
 
@@ -49,8 +52,8 @@ class ConfigManager(Generic[T]):
     def __init__(
         self,
         config_type: Type[T],
-        config_path: str,
-        config_file: str | Path
+        config_file_name: str,
+        config_file_path: str | Path
     ) -> None:
         """
         Initialize the configuration manager.
@@ -73,13 +76,13 @@ class ConfigManager(Generic[T]):
        
         try:
             # Convert directory to Path
-            directory = Path(config_path).expanduser()
+            directory = Path(config_file_path).expanduser()
     
             # Combine directory and filename
-            self.config_path = directory / config_file
+            self.config_file = directory / config_file_name
     
             # Resolve the full path
-            self.config_path = self.config_path.resolve()
+            self.config_file = self.config_file.resolve()
     
         except (TypeError, ValueError, OSError) as e:
             raise ConfigFileError(
@@ -100,6 +103,7 @@ class ConfigManager(Generic[T]):
         """
         Create a configuration object using application defaults.
         """
+        
         try:
             config = self.config_type()
 
@@ -113,7 +117,7 @@ class ConfigManager(Generic[T]):
         return config
     
     #===============================================================================
-    # load_config
+    # load
     #===============================================================================
     def load(self) -> T:
         """
@@ -125,146 +129,124 @@ class ConfigManager(Generic[T]):
         Unknown fields generate a validation error.
         """
         
-        config_path = self.config_path
+        config_file = self.config_path
         
-        if not self.config_path.exists():
-            raise ConfigError(f"Config file not found: {self.config_path}")
+        if not config_file.exists():
+            raise ConfigError(f"Config file not found: {config_file}")
     
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                raw = yaml.safe_load(f) or {}
+            with config_file.open("r", encoding="utf-8") as file:
+                raw_config = yaml.safe_load(file) or {}  
+                
         except yaml.YAMLError as e:
             raise ConfigError("Configuration file is not valid YAML") from e
+
         except OSError as e:
             raise ConfigError(f"Unable to read config file: {self.config_path}") from e
     
-        try:
-            config = create()    
-                # Existing YAL files remain compatible; use the default if absent.
-                prompt_instructions=raw.get("PROMPT_INSTRUCTIONS", DEFAULT_PROMPT_INSTRUCTIONS),
+        if not isinstance(raw_config, dict):
+            raise ConfigValidationError(
+                "Configuration file must contain a YAML mapping"
             )
-        except KeyError as e:
-            raise ConfigError(f"Missing required config key: {e.args[0]}") from e
-    
-        config.validate()
+
+
+        config = self._create_config(raw_config)    
+        
+        logger.info(
+            "Configuration loaded: %s",
+            self.config_file
+        )
+
         return config
             
- 
-    def validate(self) -> None:
-        ''' Doc string '''
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+    def save(self, config: T) -> None:
+        """
+        Save configuration to YAML.
+        """
 
-        # ---- CHROMA DB NAME ----
-        if not isinstance(self.chroma_db, str) or not self.chroma_db.strip():
-            raise ConfigError("CHROMA_DB must be a non-empty string")
-
-        invalid_chars = r'<>:"/\\|?*'
-        if any(c in self.chroma_db for c in invalid_chars):
-            raise ConfigError(
-                f"CHROMA_DB contains invalid filesystem characters: {invalid_chars}"
-            )
-
-        # ---- CHROMA DB PATH ----
-        if not isinstance(self.chroma_db_path, str) or not self.chroma_db_path.strip():
-            raise ConfigError("CHROMA_DB_PATH must be a non-empty string")
-
-        path = Path(self.chroma_db_path).expanduser()
+        self.validate(config)
 
         try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise ConfigError(f"Cannot create/access CHROMA_DB_PATH: {path}") from e
-
-        if not path.is_dir():
-            raise ConfigError(f"CHROMA_DB_PATH is not a directory: {path}")
-
-        self.chroma_db_path = str(path)
-
-        # ---- DEFAULT LLM ----
-        if not isinstance(self.default_llm, LLM_types):
-            raise ConfigError("DEFAULT_LLM must be a valid LLM_types enum value")
-
-                # ---- PROMPT INSTRUCTIONS ----
-        if not isinstance(self.prompt_instructions, str) or not self.prompt_instructions.strip():
-            raise ConfigError("PROMPT_INSTRUCTIONS must be a non-empty string")
-
-
-    def update(
-        self,
-        *,
-        chroma_db: str,
-        chroma_db_path: str,
-        default_llm: LLM_types,
-        prompt_instructions: str | None = None,
-    ) -> None:
-
-        self.chroma_db = chroma_db
-        self.chroma_db_path = chroma_db_path
-        self.default_llm = default_llm
-        if prompt_instructions is not None:
-            self.prompt_instructions = prompt_instructions  
-
-        self.validate()
-
-
-# # --------------------
-# # Persistence
-# # --------------------
-
-#===============================================================================
-# load_config
-#===============================================================================
-def load_config(config_file_name: str , config_file_path: str) -> AppConfig:
-    ''' Doc string '''
-    config_path = Path(config_file_path) / config_file_name
-
-    if not config_path.exists():
-        raise ConfigError(f"Config file not found: {config_path}")
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise ConfigError("Configuration file is not valid YAML") from e
-    except OSError as e:
-        raise ConfigError(f"Unable to read config file: {config_path}") from e
-
-    try:
-        config = AppConfig(
-            chroma_db=raw["CHROMA_DB"],
-            chroma_db_path=raw["CHROMA_DB_PATH"],
-            default_llm=LLM_types(raw["DEFAULT_LLM"]),
-
-            # Existing YAML files remain compatible; use the default if absent.
-            prompt_instructions=raw.get("PROMPT_INSTRUCTIONS", DEFAULT_PROMPT_INSTRUCTIONS),
-        )
-    except KeyError as e:
-        raise ConfigError(f"Missing required config key: {e.args[0]}") from e
-
-    config.validate()
-    return config
-
-
-#===============================================================================
-# save_config
-#===============================================================================
-def save_config(config: AppConfig) -> None:
-    config_path = Path(CONFIG_FILE_PATH) / CONFIG_FILE_NAME
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                {
-                    "CHROMA_DB": config.chroma_db,
-                    "CHROMA_DB_PATH": config.chroma_db_path,
-                    "DEFAULT_LLM": config.default_llm.value,
-                    "PROMPT_INSTRUCTIONS": config.prompt_instructions,
-                },
-                f,
+            self.config_file.parent.mkdir(
+                parents=True,
+                exist_ok=True
             )
-    except OSError as e:
-        raise ConfigError("Failed to save configuration file") from e
 
+            config_values = self._serialize(config)
+
+            temp_file = self.config_file.with_name(
+                self.config_file.name + ".tmp"
+            )
+
+            try:
+                with temp_file.open(
+                    "w",
+                    encoding="utf-8"
+                ) as file:
+
+                    yaml.safe_dump(
+                        config_values,
+                        file,
+                        sort_keys=False,
+                        allow_unicode=True
+                    )
+
+                temp_file.replace(self.config_file)
+
+            finally:
+                if temp_file.exists():
+                    temp_file.unlink()
+
+        except (OSError, yaml.YAMLError) as e:
+            raise ConfigFileError(
+                f"Unable to save configuration: {self.config_file}"
+            ) from e
+
+        logger.info(
+            "Configuration saved: %s",
+            self.config_file
+        )
+
+ 
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
+    def validate(self, config: T) -> None:
+        """
+        Validate a configuration object.
+
+        Application-specific validation is performed by the
+        configuration object's own validate() method.
+        """
+
+        if not isinstance(config, self.config_type):
+            raise ConfigValidationError(
+                f"Expected {self.config_type.__name__}, "
+                f"received {type(config).__name__}"
+            )
+
+        validator = getattr(config, "validate", None)
+
+        if not callable(validator):
+            raise ConfigValidationError(
+                "Configuration object must implement validate()"
+            )
+
+        validator()
+
+    # --------------------------------------------------------
+    # Exists
+    # --------------------------------------------------------
+
+    def exists(self) -> bool:
+        """
+        Check whether the configuration file exists.
+        """
+
+        return self.config_file.is_file()
 
 # --------------------
 # Secrets
@@ -294,4 +276,166 @@ def set_google_api_key(value: str) -> None:
         keyring.set_password(SERVICE_NAME, KEY_NAME, value)
     except Exception as e:
         raise ConfigError("Failed to store Google API key in keyring") from e
+
+
+    # ========================================================
+    # Internal helper methods
+    # ========================================================
+
+    # --------------------------------------------------------
+    # Create configuration object from dictionary
+    # --------------------------------------------------------
+
+    def _create_config(self, raw_config: dict) -> T:
+        """
+        Construct an application configuration object.
+
+        Missing values use dataclass defaults.
+        Unknown fields are rejected.
+        """
+
+        valid_fields = {
+            field.name
+            for field in fields(self.config_type)
+            if field.init
+        }
+
+        unknown_fields = set(raw_config) - valid_fields
+
+        if unknown_fields:
+            raise ConfigValidationError(
+                f"Unknown configuration fields: "
+                f"{', '.join(sorted(unknown_fields))}"
+            )
+
+        try:
+            # Instantiate defaults first. This also preserves
+            # default objects such as nested dataclasses.
+            defaults = self.config_type()
+
+            config_values = {
+                field.name: getattr(defaults, field.name)
+                for field in fields(self.config_type)
+                if field.init
+            }
+
+            # Apply values loaded from YAML.
+            config_values.update(raw_config)
+
+            # Convert YAML values to supported Python types.
+            type_hints = get_type_hints(self.config_type)
+
+            for name, value in config_values.items():
+
+                if name in type_hints:
+                    config_values[name] = self._coerce_value(
+                        value,
+                        type_hints[name]
+                    )
+
+            config = self.config_type(**config_values)
+
+        except ConfigError:
+            raise
+
+        except (TypeError, ValueError) as e:
+            raise ConfigValidationError(
+                f"Unable to construct configuration: {e}"
+            ) from e
+
+        self.validate(config)
+
+        return config
+
+    # --------------------------------------------------------
+    # Convert values to Python types
+    # --------------------------------------------------------
+
+    def _coerce_value(self, value, expected_type):
+        """
+        Convert YAML values into supported Python types.
+
+        Handles Enum, Path and Optional/Union annotations.
+        """
+
+        if value is None:
+            return None
+
+        origin = get_origin(expected_type)
+        args = get_args(expected_type)
+
+        # Handle Optional and Union types.
+        if origin in (Union, UnionType):
+
+            for arg in args:
+                if arg is type(None):
+                    continue
+
+                try:
+                    return self._coerce_value(value, arg)
+                except (TypeError, ValueError):
+                    continue
+
+            raise ConfigValidationError(
+                f"Cannot convert value {value!r} "
+                f"to {expected_type}"
+            )
+
+        # Handle Enum values.
+        if isinstance(expected_type, type) and issubclass(
+            expected_type, Enum
+        ):
+            if isinstance(value, expected_type):
+                return value
+
+            return expected_type(value)
+
+        # Handle filesystem paths.
+        if expected_type is Path:
+            return Path(value)
+
+        return value
+
+    # --------------------------------------------------------
+    # Serialize configuration
+    # --------------------------------------------------------
+
+    def _serialize(self, config):
+        """
+        Convert configuration values into YAML-compatible values.
+
+        Handles dataclasses, Enum, Path and nested collections.
+        """
+
+        if is_dataclass(config) and not isinstance(config, type):
+            return self._serialize(asdict(config))
+
+        if isinstance(config, Enum):
+            return config.value
+
+        if isinstance(config, Path):
+            return str(config)
+
+        if isinstance(config, dict):
+            return {
+                key: self._serialize(value)
+                for key, value in config.items()
+            }
+
+        if isinstance(config, (list, tuple)):
+            return [
+                self._serialize(value)
+                for value in config
+            ]
+
+        if config is None or isinstance(
+            config, (str, int, float, bool)
+        ):
+            return config
+
+        raise ConfigValidationError(
+            f"Unsupported configuration value type: "
+            f"{type(config).__name__}"
+        )
+
 
