@@ -8,22 +8,18 @@ Created on Jan 15, 2026
 # Module logger
 #===============================================================================
 import logging
-from os import path
-from sympy.printing import str
 logger = logging.getLogger(__name__)
 
 # common imports
 import yaml 
-import os
-import keyring
 from enum import Enum
 from pathlib import Path
-from dataclasses import dataclass, asdict, is_dataclass, fields
+from dataclasses import asdict, is_dataclass, fields
 from typing import TypeVar, Generic, Type, get_type_hints, get_origin, get_args
 from types import UnionType
 from typing import Union
 
-from .exceptions import ConfigError, ConfigValidationError, ConfigFileError, ConfigSecretError
+from .exceptions import ConfigError, ConfigValidationError, ConfigFileError
 
 # create a generic type variable
 T = TypeVar("T")
@@ -73,7 +69,26 @@ class ConfigManager(Generic[T]):
             raise ConfigValidationError(
                 "Configuration type must be a dataclass"
             )
-       
+        if not config_file_name:
+            raise ConfigValidationError(
+                "Configuration filename cannot be empty"
+            )
+        
+        if (
+            not isinstance(config_file_name, str)
+            or not config_file_name.strip()
+            or config_file_name in (".", "..")
+        ):
+            raise ConfigValidationError(
+                "A valid configuration filename is required"
+            )           
+        
+        if config_file_path is None:
+            raise ConfigValidationError(
+                "Configuration directory must be provided"
+            ) 
+
+        
         try:
             # Convert directory to Path
             directory = Path(config_file_path).expanduser()
@@ -93,7 +108,7 @@ class ConfigManager(Generic[T]):
     
         logger.debug(
             "Configuration manager initialized: %s",
-            self.config_path
+            self.config_file
         )
     
     #===============================================================================
@@ -119,7 +134,7 @@ class ConfigManager(Generic[T]):
     #===============================================================================
     # load
     #===============================================================================
-    def load(self) -> T:
+    def load(self, create_if_missing: bool = False) -> T:
         """
         Load configuration from YAML.
 
@@ -129,20 +144,30 @@ class ConfigManager(Generic[T]):
         Unknown fields generate a validation error.
         """
         
-        config_file = self.config_path
+        config_file = self.config_file
         
         if not config_file.exists():
-            raise ConfigError(f"Config file not found: {config_file}")
-    
+            if create_if_missing:
+                config = self.create()
+                self.save(config)
+                return config
+        
+            raise ConfigFileError(
+                f"Config file not found: {config_file}"
+            )           
+            
         try:
             with config_file.open("r", encoding="utf-8") as file:
-                raw_config = yaml.safe_load(file) or {}  
+                raw_config = yaml.safe_load(file)
+            
+            if raw_config is None:
+                raw_config = {}      
                 
         except yaml.YAMLError as e:
-            raise ConfigError("Configuration file is not valid YAML") from e
+            raise ConfigFileError("Configuration file is not valid YAML") from e
 
         except OSError as e:
-            raise ConfigError(f"Unable to read config file: {self.config_path}") from e
+            raise ConfigFileError(f"Unable to read config file: {self.config_file}") from e
     
         if not isinstance(raw_config, dict):
             raise ConfigValidationError(
@@ -248,35 +273,6 @@ class ConfigManager(Generic[T]):
 
         return self.config_file.is_file()
 
-# --------------------
-# Secrets
-# --------------------
-
-SERVICE_NAME = "AskMeApp"
-KEY_NAME = "google_api_key"
-
-
-#===============================================================================
-# get_google_api_key
-#===============================================================================
-def get_google_api_key() -> str | None:
-    try:
-        key = keyring.get_password(SERVICE_NAME, KEY_NAME)
-    except Exception:
-        key = None
-
-    return key or os.environ.get("GOOGLE_API_KEY")
-
-
-#===============================================================================
-# set_google_api_key
-#===============================================================================
-def set_google_api_key(value: str) -> None:
-    try:
-        keyring.set_password(SERVICE_NAME, KEY_NAME, value)
-    except Exception as e:
-        raise ConfigError("Failed to store Google API key in keyring") from e
-
 
     # ========================================================
     # Internal helper methods
@@ -351,51 +347,318 @@ def set_google_api_key(value: str) -> None:
     # Convert values to Python types
     # --------------------------------------------------------
 
+
     def _coerce_value(self, value, expected_type):
         """
-        Convert YAML values into supported Python types.
-
-        Handles Enum, Path and Optional/Union annotations.
+        Convert YAML values into the Python types specified
+        by the application configuration dataclass.
+    
+        Supported types:
+            - str, int, float, bool
+            - Path
+            - Enum
+            - Optional and Union
+            - list, tuple, set, frozenset
+            - dict
+            - Nested dataclasses
+    
+        Raises:
+            ConfigValidationError: Value cannot be converted
+                                   to the expected type.
         """
-
+    
+        # --------------------------------------------------------
+        # None values
+        # --------------------------------------------------------
+    
         if value is None:
-            return None
-
+    
+            if expected_type is type(None):
+                return None
+    
+            origin = get_origin(expected_type)
+            args = get_args(expected_type)
+    
+            if origin in (Union, UnionType) and type(None) in args:
+                return None
+    
+            raise ConfigValidationError(
+                f"None is not valid for {expected_type}"
+            )
+    
+        # --------------------------------------------------------
+        # Resolve generic type information
+        # --------------------------------------------------------
+    
         origin = get_origin(expected_type)
         args = get_args(expected_type)
-
-        # Handle Optional and Union types.
+    
+        # --------------------------------------------------------
+        # Optional and Union
+        # --------------------------------------------------------
+    
         if origin in (Union, UnionType):
-
+    
+            errors = []
+    
             for arg in args:
+    
                 if arg is type(None):
                     continue
-
+    
                 try:
                     return self._coerce_value(value, arg)
-                except (TypeError, ValueError):
-                    continue
-
+    
+                except (TypeError, ValueError, ConfigError) as e:
+                    errors.append(str(e))
+    
             raise ConfigValidationError(
-                f"Cannot convert value {value!r} "
-                f"to {expected_type}"
+                f"Cannot convert {value!r} to {expected_type}. "
+                f"Conversion errors: {'; '.join(errors)}"
             )
-
-        # Handle Enum values.
+    
+        # --------------------------------------------------------
+        # List
+        # --------------------------------------------------------
+    
+        if origin is list:
+    
+            if not isinstance(value, (list, tuple)):
+                raise ConfigValidationError(
+                    f"Expected a list for {expected_type}"
+                )
+    
+            item_type = args[0] if args else object
+    
+            return [
+                self._coerce_value(item, item_type)
+                for item in value
+            ]
+    
+        # --------------------------------------------------------
+        # Tuple
+        # --------------------------------------------------------
+    
+        if origin is tuple:
+    
+            if not isinstance(value, (list, tuple)):
+                raise ConfigValidationError(
+                    f"Expected a sequence for {expected_type}"
+                )
+    
+            # Handle tuple[T, ...]
+            if len(args) == 2 and args[1] is Ellipsis:
+    
+                return tuple(
+                    self._coerce_value(item, args[0])
+                    for item in value
+                )
+    
+            # Handle tuple[T1, T2, ...]
+            if args:
+    
+                if len(value) != len(args):
+                    raise ConfigValidationError(
+                        f"Expected {len(args)} tuple values, "
+                        f"received {len(value)}"
+                    )
+    
+                return tuple(
+                    self._coerce_value(item, item_type)
+                    for item, item_type in zip(value, args)
+                )
+    
+            return tuple(value)
+    
+        # --------------------------------------------------------
+        # Set and Frozenset
+        # --------------------------------------------------------
+    
+        if origin in (set, frozenset):
+    
+            if not isinstance(value, (list, tuple, set, frozenset)):
+                raise ConfigValidationError(
+                    f"Expected a collection for {expected_type}"
+                )
+    
+            item_type = args[0] if args else object
+    
+            converted = (
+                self._coerce_value(item, item_type)
+                for item in value
+            )
+    
+            return origin(converted)
+    
+        # --------------------------------------------------------
+        # Dictionary
+        # --------------------------------------------------------
+    
+        if origin is dict:
+    
+            if not isinstance(value, dict):
+                raise ConfigValidationError(
+                    f"Expected a dictionary for {expected_type}"
+                )
+    
+            key_type = args[0] if args else object
+            value_type = args[1] if args else object
+    
+            return {
+                self._coerce_value(key, key_type):
+                self._coerce_value(item, value_type)
+                for key, item in value.items()
+            }
+    
+        # --------------------------------------------------------
+        # Nested dataclasses
+        # --------------------------------------------------------
+    
+        if isinstance(expected_type, type) and is_dataclass(expected_type):
+    
+            if isinstance(value, expected_type):
+                return value
+    
+            if not isinstance(value, dict):
+                raise ConfigValidationError(
+                    f"Expected a mapping for {expected_type.__name__}"
+                )
+    
+            nested_config = self._create_config_for_type(
+                value,
+                expected_type
+            )
+    
+            return nested_config
+    
+        # --------------------------------------------------------
+        # Enum
+        # --------------------------------------------------------
+    
         if isinstance(expected_type, type) and issubclass(
             expected_type, Enum
         ):
+    
             if isinstance(value, expected_type):
                 return value
-
-            return expected_type(value)
-
-        # Handle filesystem paths.
+    
+            try:
+                return expected_type(value)
+    
+            except ValueError as e:
+                raise ConfigValidationError(
+                    f"Invalid value {value!r} for "
+                    f"enum {expected_type.__name__}"
+                ) from e
+    
+        # --------------------------------------------------------
+        # Path
+        # --------------------------------------------------------
+    
         if expected_type is Path:
-            return Path(value)
-
-        return value
-
+    
+            try:
+                return Path(value)
+    
+            except (TypeError, ValueError) as e:
+                raise ConfigValidationError(
+                    f"Invalid path value: {value!r}"
+                ) from e
+    
+        # --------------------------------------------------------
+        # String
+        # --------------------------------------------------------
+    
+        if expected_type is str:
+    
+            if isinstance(value, str):
+                return value
+    
+            if isinstance(value, (int, float, bool)):
+                return str(value)
+    
+            raise ConfigValidationError(
+                f"Cannot convert {type(value).__name__} to str"
+            )
+    
+        # --------------------------------------------------------
+        # Boolean
+        # --------------------------------------------------------
+    
+        if expected_type is bool:
+    
+            if isinstance(value, bool):
+                return value
+    
+            if isinstance(value, str):
+    
+                normalized = value.strip().lower()
+    
+                if normalized in ("true", "yes", "1", "on"):
+                    return True
+    
+                if normalized in ("false", "no", "0", "off"):
+                    return False
+    
+            raise ConfigValidationError(
+                f"Cannot convert {value!r} to bool"
+            )
+    
+        # --------------------------------------------------------
+        # Integer
+        # --------------------------------------------------------
+    
+        if expected_type is int:
+    
+            if isinstance(value, bool):
+                raise ConfigValidationError(
+                    "Boolean values cannot be converted to integers"
+                )
+    
+            try:
+                if isinstance(value, float) and not value.is_integer():
+                    raise ValueError("Non-integral float")
+    
+                return int(value)
+    
+            except (TypeError, ValueError, OverflowError) as e:
+                raise ConfigValidationError(
+                    f"Cannot convert {value!r} to int"
+                ) from e
+    
+        # --------------------------------------------------------
+        # Float
+        # --------------------------------------------------------
+    
+        if expected_type is float:
+    
+            if isinstance(value, bool):
+                raise ConfigValidationError(
+                    "Boolean values cannot be converted to floats"
+                )
+    
+            try:
+                return float(value)
+    
+            except (TypeError, ValueError, OverflowError) as e:
+                raise ConfigValidationError(
+                    f"Cannot convert {value!r} to float"
+                ) from e
+    
+        # --------------------------------------------------------
+        # Other types
+        # --------------------------------------------------------
+    
+        if expected_type is object:
+            return value
+    
+        if isinstance(expected_type, type) and isinstance(value, expected_type):
+            return value
+    
+        raise ConfigValidationError(
+            f"Unsupported conversion: {type(value).__name__} "
+            f"to {expected_type}"
+        )
     # --------------------------------------------------------
     # Serialize configuration
     # --------------------------------------------------------
