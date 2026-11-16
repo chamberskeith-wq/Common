@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 import yaml 
 from enum import Enum
 from pathlib import Path
-from dataclasses import asdict, is_dataclass, fields
+from dataclasses import MISSING, asdict, is_dataclass, fields
 from typing import TypeVar, Generic, Type, get_type_hints, get_origin, get_args
 from types import UnionType
 from typing import Union
@@ -69,20 +69,17 @@ class ConfigManager(Generic[T]):
             raise ConfigValidationError(
                 "Configuration type must be a dataclass"
             )
-        if not config_file_name:
-            raise ConfigValidationError(
-                "Configuration filename cannot be empty"
-            )
-        
         if (
             not isinstance(config_file_name, str)
             or not config_file_name.strip()
             or config_file_name in (".", "..")
+            or "/" in config_file_name
+            or "\\" in config_file_name
         ):
             raise ConfigValidationError(
                 "A valid configuration filename is required"
-            )           
-        
+            )
+
         if config_file_path is None:
             raise ConfigValidationError(
                 "Configuration directory must be provided"
@@ -175,7 +172,8 @@ class ConfigManager(Generic[T]):
             )
 
 
-        config = self._create_config(raw_config)    
+        config = self._create_config(raw_config)
+        self.validate(config)
         
         logger.info(
             "Configuration loaded: %s",
@@ -290,58 +288,62 @@ class ConfigManager(Generic[T]):
         Unknown fields are rejected.
         """
 
-        valid_fields = {
-            field.name
-            for field in fields(self.config_type)
-            if field.init
-        }
-
-        unknown_fields = set(raw_config) - valid_fields
-
-        if unknown_fields:
-            raise ConfigValidationError(
-                f"Unknown configuration fields: "
-                f"{', '.join(sorted(unknown_fields))}"
-            )
-
-        try:
-            # Instantiate defaults first. This also preserves
-            # default objects such as nested dataclasses.
-            defaults = self.config_type()
-
-            config_values = {
-                field.name: getattr(defaults, field.name)
-                for field in fields(self.config_type)
-                if field.init
-            }
-
-            # Apply values loaded from YAML.
-            config_values.update(raw_config)
-
-            # Convert YAML values to supported Python types.
-            type_hints = get_type_hints(self.config_type)
-
-            for name, value in config_values.items():
-
-                if name in type_hints:
-                    config_values[name] = self._coerce_value(
-                        value,
-                        type_hints[name]
-                    )
-
-            config = self.config_type(**config_values)
-
-        except ConfigError:
-            raise
-
-        except (TypeError, ValueError) as e:
-            raise ConfigValidationError(
-                f"Unable to construct configuration: {e}"
-            ) from e
-
-        self.validate(config)
-
-        return config
+        return self._create_config_for_type(
+            raw_config,
+            self.config_type
+        )
+        # valid_fields = {
+        #     field.name
+        #     for field in fields(self.config_type)
+        #     if field.init
+        # }
+        #
+        # unknown_fields = set(raw_config) - valid_fields
+        #
+        # if unknown_fields:
+        #     raise ConfigValidationError(
+        #         f"Unknown configuration fields: "
+        #         f"{', '.join(sorted(unknown_fields))}"
+        #     )
+        #
+        # try:
+        #     # Instantiate defaults first. This also preserves
+        #     # default objects such as nested dataclasses.
+        #     defaults = self.config_type()
+        #
+        #     config_values = {
+        #         field.name: getattr(defaults, field.name)
+        #         for field in fields(self.config_type)
+        #         if field.init
+        #     }
+        #
+        #     # Apply values loaded from YAML.
+        #     config_values.update(raw_config)
+        #
+        #     # Convert YAML values to supported Python types.
+        #     type_hints = get_type_hints(self.config_type)
+        #
+        #     for name, value in config_values.items():
+        #
+        #         if name in type_hints:
+        #             config_values[name] = self._coerce_value(
+        #                 value,
+        #                 type_hints[name]
+        #             )
+        #
+        #     config = self.config_type(**config_values)
+        #
+        # except ConfigError:
+        #     raise
+        #
+        # except (TypeError, ValueError) as e:
+        #     raise ConfigValidationError(
+        #         f"Unable to construct configuration: {e}"
+        #     ) from e
+        #
+        # self.validate(config)
+        #
+        # return config
 
     # --------------------------------------------------------
     # Convert values to Python types
@@ -685,7 +687,7 @@ class ConfigManager(Generic[T]):
                 for key, value in config.items()
             }
 
-        if isinstance(config, (list, tuple)):
+        if isinstance(config, (list, tuple, set, frozenset)):
             return [
                 self._serialize(value)
                 for value in config
@@ -702,3 +704,79 @@ class ConfigManager(Generic[T]):
         )
 
 
+    def _create_config_for_type(self, raw_config: dict, config_type: type):
+        """
+        Construct a dataclass from a dictionary.
+
+        Supports nested dataclasses, default values and required fields.
+        """
+
+        if not isinstance(raw_config, dict):
+            raise ConfigValidationError(
+                f"Expected dictionary for {config_type.__name__}"
+            )
+
+        # YAML mapping keys must be strings.
+        if not all(isinstance(key, str) for key in raw_config):
+            raise ConfigValidationError(
+                f"Configuration fields in {config_type.__name__} "
+                "must have string names"
+            )
+
+        valid_fields = {
+            field.name
+            for field in fields(config_type)
+            if field.init
+        }
+
+        unknown_fields = set(raw_config) - valid_fields
+
+        if unknown_fields:
+            raise ConfigValidationError(
+                f"Unknown fields in {config_type.__name__}: "
+                f"{', '.join(sorted(unknown_fields))}"
+            )
+
+        try:
+            # Start with declared defaults. Fields without defaults are
+            # omitted so values supplied by YAML can satisfy required fields.
+            config_values = {}
+
+            for field in fields(config_type):
+                if not field.init:
+                    continue
+
+                if field.default is not MISSING:
+                    config_values[field.name] = field.default
+                elif field.default_factory is not MISSING:
+                    config_values[field.name] = field.default_factory()
+
+            # Apply values loaded from YAML.
+            config_values.update(raw_config)
+
+            type_hints = get_type_hints(config_type)
+
+            for name, value in config_values.items():
+                if name in type_hints:
+                    config_values[name] = self._coerce_value(
+                        value,
+                        type_hints[name]
+                    )
+
+            config = config_type(**config_values)
+
+            # Nested dataclasses may define their own validator.
+            validator = getattr(config, "validate", None)
+
+            if callable(validator):
+                validator()
+
+            return config
+
+        except ConfigError:
+            raise
+
+        except (TypeError, ValueError) as e:
+            raise ConfigValidationError(
+                f"Unable to construct {config_type.__name__}: {e}"
+            ) from e
