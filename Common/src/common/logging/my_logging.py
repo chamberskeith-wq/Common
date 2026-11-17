@@ -77,14 +77,40 @@ def configure_base_logging(
 # -----------------------------------------------------------------------------
 
 def enforce_library_levels(
+        app_namespace: str,
     *,
     app_level: int = APP_LOG_LEVEL,
     library_level: int = LIB_LOG_LEVEL,
     libraries: Iterable[str] = NOISY_LIBRARIES,
 ) -> None:
+    """
+    Set logging levels for application and external libraries.
+
+    Args:
+        app_namespace: Application logger namespace.
+        app_level: Logging level for the application.
+        library_level: Logging level for external libraries.
+        libraries: External library logger names.
+
+    Raises:
+        TypeError: If app_namespace is not a string.
+        ValueError: If app_namespace is empty.
+    """
+
+    # Validate application namespace.
+    if not isinstance(app_namespace, str):
+        raise TypeError(
+            "app_namespace must be a string"
+        )
+
+    if not app_namespace.strip():
+        raise ValueError(
+            "app_namespace cannot be empty"
+        )
+
     
     for name in libraries:
         logging.getLogger(name).setLevel(library_level)
 
-    logging.getLogger(APP_NAMESPACE).setLevel(app_level)
+    logging.getLogger(app_namespace).setLevel(app_level)
     
