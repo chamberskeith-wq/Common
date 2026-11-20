@@ -1,0 +1,20 @@
+src
+├── common
+│   ├── assets
+│   │   └── Fonts
+│   │       └── DejaVuSans.ttf
+│   ├── configuration
+│   │   ├── __init__.py
+│   │   ├── exceptions.py
+│   │   ├── manager.py
+│   │   └── secrets.py
+│   ├── logging
+│   │   ├── __init__.py
+│   │   └── my_logging.py
+│   └── ui
+│       ├── __init__.py
+│       ├── confirmation_popup.py
+│       ├── directory_picker.py
+│       ├── error_popup.py
+│       └── message_popup.py
+└── create_project_structure.py

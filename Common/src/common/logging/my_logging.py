@@ -35,7 +35,7 @@ NOISY_LIBRARIES: tuple[str, ...] = (
 LOG_FORMAT = "[%(levelname)-7s] [%(name)-22s] %(message)s"
 
 LIB_LOG_LEVEL = logging.WARNING
-APP_LOG_LEVEL = logging.INFO
+APP_LOG_LEVEL = logging.INFO # default can be changed by the app
 
 
 # -----------------------------------------------------------------------------
